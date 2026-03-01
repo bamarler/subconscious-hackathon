@@ -1,19 +1,20 @@
+from __future__ import annotations
+
 import io
-import json
 import os
-from typing import Generator
+from typing import TYPE_CHECKING, Generator
+
+if TYPE_CHECKING:
+    from .job_store import Job
 
 import fal_client
 from subconscious import Subconscious
 
 from .config import settings
 from .models import (
-    CharacterMap,
+    ComicBlueprint,
     ComicPanel,
     ComicResult,
-    ComicScript,
-    ConceptExtraction,
-    ImagePrompts,
     ParsedLecture,
     PipelineEvent,
     SlideContent,
@@ -21,10 +22,7 @@ from .models import (
 
 STEP_NAMES = [
     "Parsing slideshow",
-    "Extracting concepts",
-    "Mapping characters",
-    "Writing panel scripts",
-    "Generating image prompts",
+    "Creating comic blueprint",
     "Drawing panels",
 ]
 
@@ -84,91 +82,40 @@ def parse_file(file_bytes: bytes, filename: str) -> ParsedLecture:
         raise ValueError(f"Unsupported file type: .{ext}")
 
 
-# ── Steps 2-5: Subconscious calls ──
+# ── Step 2: Single Subconscious call ──
 
 
-def _sub_run(client: Subconscious, instructions: str, answer_format: type):
+def create_blueprint(client: Subconscious, lecture: ParsedLecture) -> ComicBlueprint:
+    instructions = f"""You are Comify, an expert at turning lecture content into engaging educational comics.
+
+Given the lecture notes below, produce a complete comic blueprint in a single pass:
+
+1. EXTRACT KEY CONCEPTS (3-8) from the lecture. Identify a central tension or conflict that can drive a narrative.
+2. DESIGN CHARACTERS (2-6) that personify the concepts. Give each a creative name, detailed visual description (for image generation), personality, and story role.
+3. CHOOSE AN ART STYLE that fits the subject matter (e.g. "retro sci-fi illustration", "Studio Ghibli watercolor", "pop art comic book").
+4. WRITE A 5-PANEL COMIC SCRIPT with dialogue, action, settings, and mood. Use the central tension to create a mini-story with beginning, middle, and end.
+5. GENERATE 5 IMAGE PROMPTS optimized for AI image generation. Each prompt MUST start with the art style. Include character visual descriptions, composition, lighting, and mood. Do NOT include text, speech bubbles, or lettering in the image prompts.
+
+Lecture content:
+{lecture.full_text}"""
+
     run = client.run(
         engine=settings.engine,
         input={
             "instructions": instructions,
-            "answerFormat": answer_format,
+            "answerFormat": ComicBlueprint,
         },
         options={"await_completion": True},
     )
     if not run.result or not run.result.answer:
         raise RuntimeError("No result from Subconscious")
-    return answer_format.model_validate_json(run.result.answer)
+    return ComicBlueprint.model_validate_json(run.result.answer)
 
 
-def extract_concepts(client: Subconscious, lecture: ParsedLecture) -> ConceptExtraction:
-    instructions = f"""You are a concept extraction expert. Analyze these lecture notes and extract
-the key concepts (3-8), identify the central tension or conflict that could drive a comic narrative,
-and outline a narrative arc for a 5-panel comic strip.
-
-Lecture content:
-{lecture.full_text}"""
-    return _sub_run(client, instructions, ConceptExtraction)
-
-
-def map_characters(
-    client: Subconscious, concepts: ConceptExtraction
-) -> CharacterMap:
-    instructions = f"""You are a creative character designer for educational comics.
-Turn these abstract concepts into vivid, memorable characters for a comic strip.
-Each character should visually embody the concept they represent.
-Also choose a consistent art style for the entire comic.
-
-Concepts: {concepts.model_dump_json()}
-Central tension: {concepts.central_tension}
-Topic: {concepts.lecture_topic}"""
-    return _sub_run(client, instructions, CharacterMap)
-
-
-def write_script(
-    client: Subconscious,
-    concepts: ConceptExtraction,
-    characters: CharacterMap,
-) -> ComicScript:
-    instructions = f"""You are a comic book script writer specializing in educational content.
-Write a 5-panel comic script using these characters and concepts.
-Use the central tension to create a compelling mini-story with a beginning, middle, and end.
-Each panel needs a setting, which characters appear, dialogue, action description, and mood.
-
-Characters: {characters.model_dump_json()}
-Narrative arc: {concepts.narrative_arc}
-Central tension: {concepts.central_tension}
-Topic: {concepts.lecture_topic}"""
-    return _sub_run(client, instructions, ComicScript)
-
-
-def generate_prompts(
-    client: Subconscious,
-    script: ComicScript,
-    characters: CharacterMap,
-) -> ImagePrompts:
-    char_visuals = json.dumps(
-        [{"name": c.name, "visual": c.visual_description} for c in characters.characters]
-    )
-    instructions = f"""You are an expert at writing image generation prompts for AI image models.
-For each panel in this comic script, write a detailed image generation prompt.
-Include: composition, character appearances (reference the visual descriptions), lighting, mood,
-and the art style: {characters.art_style}
-
-Each prompt MUST start with the art style for consistency across panels.
-Avoid requesting text, lettering, or speech bubbles in the image.
-Also write a negative_prompt for things to avoid.
-
-Comic script: {script.model_dump_json()}
-Character visual references: {char_visuals}"""
-    return _sub_run(client, instructions, ImagePrompts)
-
-
-# ── Step 6: fal.ai image generation ──
+# ── Step 3: fal.ai image generation ──
 
 
 def generate_image(prompt: str, negative_prompt: str = "") -> str:
-    # Ensure FAL_KEY is set in the environment for fal_client
     if settings.fal_key:
         os.environ["FAL_KEY"] = settings.fal_key
 
@@ -177,7 +124,7 @@ def generate_image(prompt: str, negative_prompt: str = "") -> str:
         full_negative = f"{negative_prompt}, {full_negative}"
 
     response = fal_client.run(
-        "fal-ai/flux/dev",
+        "fal-ai/nano-banana-2",
         arguments={
             "prompt": prompt,
             "image_size": "landscape_16_9",
@@ -205,48 +152,21 @@ def run_pipeline(file_bytes: bytes, filename: str) -> Generator[PipelineEvent, N
         yield _emit(1, "error", error=str(e))
         return
 
-    # Step 2: Concept Extraction
+    # Step 2: Single Subconscious call — concepts, characters, script, prompts
     yield _emit(2, "started")
     try:
-        concepts = extract_concepts(client, lecture)
-        yield _emit(2, "completed", data=concepts.model_dump())
+        blueprint = create_blueprint(client, lecture)
+        yield _emit(2, "completed", data=blueprint.model_dump())
     except Exception as e:
         yield _emit(2, "error", error=str(e))
         return
 
-    # Step 3: Character Mapping
+    # Step 3: Image Generation (fal.ai)
     yield _emit(3, "started")
-    try:
-        characters = map_characters(client, concepts)
-        yield _emit(3, "completed", data=characters.model_dump())
-    except Exception as e:
-        yield _emit(3, "error", error=str(e))
-        return
-
-    # Step 4: Script Writing
-    yield _emit(4, "started")
-    try:
-        script = write_script(client, concepts, characters)
-        yield _emit(4, "completed", data=script.model_dump())
-    except Exception as e:
-        yield _emit(4, "error", error=str(e))
-        return
-
-    # Step 5: Image Prompt Generation
-    yield _emit(5, "started")
-    try:
-        prompts = generate_prompts(client, script, characters)
-        yield _emit(5, "completed", data=prompts.model_dump())
-    except Exception as e:
-        yield _emit(5, "error", error=str(e))
-        return
-
-    # Step 6: Image Generation (fal.ai)
-    yield _emit(6, "started")
     try:
         panels: list[ComicPanel] = []
         for i, (panel_script, img_prompt) in enumerate(
-            zip(script.panels, prompts.prompts)
+            zip(blueprint.panels, blueprint.image_prompts)
         ):
             image_url = generate_image(
                 prompt=img_prompt.prompt,
@@ -262,9 +182,8 @@ def run_pipeline(file_bytes: bytes, filename: str) -> Generator[PipelineEvent, N
                 image_prompt=img_prompt.prompt,
             )
             panels.append(panel)
-            # Yield progress so frontend can show images as they arrive
             yield _emit(
-                6,
+                3,
                 "progress",
                 data={
                     "panel_number": panel.panel_number,
@@ -274,8 +193,15 @@ def run_pipeline(file_bytes: bytes, filename: str) -> Generator[PipelineEvent, N
                 },
             )
 
-        result = ComicResult(title=script.title, panels=panels)
-        yield _emit(6, "completed", data=result.model_dump())
+        result = ComicResult(title=blueprint.title, panels=panels)
+        yield _emit(3, "completed", data=result.model_dump())
     except Exception as e:
-        yield _emit(6, "error", error=str(e))
+        yield _emit(3, "error", error=str(e))
         return
+
+
+def run_pipeline_into_job(job: Job, file_bytes: bytes, filename: str) -> None:
+    """Run the pipeline in a background thread, writing events into the job store."""
+    job.status = "running"
+    for event in run_pipeline(file_bytes, filename):
+        job.append_event(event)

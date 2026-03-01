@@ -1,4 +1,4 @@
-import { useState, type DragEvent, type ChangeEvent } from 'react'
+import { useEffect, useState, useCallback, type DragEvent, type ChangeEvent } from 'react'
 import './App.css'
 
 interface ComicPanel {
@@ -25,13 +25,12 @@ interface PipelineEvent {
 }
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const JOB_ID_KEY = 'comify_job_id'
+const COMIC_RESULT_KEY = 'comify_last_comic'
 
 const PIPELINE_STEPS = [
   'Parsing slideshow...',
-  'Extracting key concepts...',
-  'Casting characters...',
-  'Writing the script...',
-  'Generating image prompts...',
+  'Creating comic blueprint...',
   'Drawing panels...',
 ]
 
@@ -45,47 +44,14 @@ function App() {
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set())
   const [panels, setPanels] = useState<ComicPanel[]>([])
 
-  const handleDrag = (e: DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true)
-    else if (e.type === 'dragleave') setDragActive(false)
-  }
-
-  const handleDrop = (e: DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setDragActive(false)
-    if (e.dataTransfer.files?.[0]) setFile(e.dataTransfer.files[0])
-  }
-
-  const handleFileInput = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.[0]) setFile(e.target.files[0])
-  }
-
-  const convert = async () => {
-    if (!file) return
-
+  // Shared SSE streaming logic — works for both fresh start and reconnect
+  const streamJob = useCallback(async (jobId: string) => {
     setLoading(true)
     setError('')
-    setComic(null)
-    setPanels([])
-    setStep(0)
-    setCompletedSteps(new Set())
-
-    const formData = new FormData()
-    formData.append('file', file)
 
     try {
-      const res = await fetch(`${API_URL}/api/convert`, {
-        method: 'POST',
-        body: formData,
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Unknown error' }))
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
+      const res = await fetch(`${API_URL}/api/jobs/${jobId}/stream`)
+      if (!res.ok) throw new Error('Failed to connect to job stream')
 
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
@@ -119,7 +85,7 @@ function App() {
 
           // Progressive panel rendering
           if (
-            event.step === 6 &&
+            event.step === 3 &&
             event.status === 'progress' &&
             event.data?.image_url
           ) {
@@ -132,18 +98,110 @@ function App() {
               image_url: event.data.image_url as string,
               image_prompt: '',
             }
-            setPanels((prev) => [...prev, partial])
+            setPanels((prev) => {
+              // Avoid duplicates on reconnect replay
+              if (prev.some((p) => p.panel_number === partial.panel_number)) return prev
+              return [...prev, partial]
+            })
           }
 
           // Final result
-          if (event.step === 6 && event.status === 'completed' && event.data) {
-            setComic(event.data as unknown as ComicResult)
+          if (event.step === 3 && event.status === 'completed' && event.data) {
+            const result = event.data as unknown as ComicResult
+            setComic(result)
+            localStorage.setItem(COMIC_RESULT_KEY, JSON.stringify(result))
+            localStorage.removeItem(JOB_ID_KEY)
           }
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Something went wrong')
+      setError(
+        e instanceof Error ? e.message : 'Connection lost. Refresh to reconnect.'
+      )
     } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // On mount: check for active job or cached comic
+  useEffect(() => {
+    const savedJobId = localStorage.getItem(JOB_ID_KEY)
+    if (savedJobId) {
+      fetch(`${API_URL}/api/jobs/${savedJobId}`)
+        .then((res) => {
+          if (!res.ok) throw new Error('not found')
+          return res.json()
+        })
+        .then((status) => {
+          if (status.status === 'running' || status.status === 'pending' || status.status === 'completed') {
+            streamJob(savedJobId)
+          } else {
+            localStorage.removeItem(JOB_ID_KEY)
+          }
+        })
+        .catch(() => {
+          localStorage.removeItem(JOB_ID_KEY)
+        })
+      return
+    }
+
+    // No active job — restore last comic from cache
+    const savedComic = localStorage.getItem(COMIC_RESULT_KEY)
+    if (savedComic) {
+      try {
+        setComic(JSON.parse(savedComic))
+      } catch { /* ignore parse errors */ }
+    }
+  }, [streamJob])
+
+  const handleDrag = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true)
+    else if (e.type === 'dragleave') setDragActive(false)
+  }
+
+  const handleDrop = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragActive(false)
+    if (e.dataTransfer.files?.[0]) setFile(e.dataTransfer.files[0])
+  }
+
+  const handleFileInput = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) setFile(e.target.files[0])
+  }
+
+  const convert = async () => {
+    if (!file) return
+
+    setLoading(true)
+    setError('')
+    setComic(null)
+    setPanels([])
+    setStep(0)
+    setCompletedSteps(new Set())
+    localStorage.removeItem(COMIC_RESULT_KEY)
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    try {
+      const res = await fetch(`${API_URL}/api/convert`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Unknown error' }))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+
+      const { job_id } = await res.json()
+      localStorage.setItem(JOB_ID_KEY, job_id)
+      await streamJob(job_id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong')
       setLoading(false)
     }
   }
@@ -190,7 +248,7 @@ function App() {
           ) : (
             <div className="drop-prompt">
               <p>Drop your slideshow here or click to browse</p>
-              <p className="drop-hint">Supports .pptx and .pdf (max 10 MB)</p>
+              <p className="drop-hint">Supports .pptx and .pdf</p>
             </div>
           )}
         </div>
@@ -232,10 +290,7 @@ function App() {
             <div key={p.panel_number} className="panel panel-arriving">
               <div className="panel-image">
                 {p.image_url && (
-                  <img
-                    src={p.image_url}
-                    alt={`Panel ${p.panel_number}`}
-                  />
+                  <img src={p.image_url} alt={`Panel ${p.panel_number}`} />
                 )}
               </div>
             </div>
@@ -245,7 +300,7 @@ function App() {
 
       {error && <div className="error">{error}</div>}
 
-      {comic && (
+      {comic && !loading && (
         <div className="comic-container">
           <h2 className="comic-title">{comic.title}</h2>
           <div className="panels-grid">

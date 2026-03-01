@@ -15,29 +15,14 @@ class ParsedLecture(BaseModel):
     full_text: str = Field(..., description="Concatenated text from all slides")
 
 
-# ── Step 2: Concept Extractor (Subconscious answerFormat) ──
+# ── Step 2: Single Subconscious call (answerFormat) ──
+# Combines concept extraction, character mapping, script writing, and image prompt generation.
 
 
 class Concept(BaseModel):
     name: str = Field(..., description="Short name for the concept")
     description: str = Field(..., description="One-sentence explanation")
     importance: int = Field(..., ge=1, le=10, description="How central to the lecture (1-10)")
-
-
-class ConceptExtraction(BaseModel):
-    concepts: list[Concept] = Field(
-        ..., description="Key concepts extracted from the lecture"
-    )
-    central_tension: str = Field(
-        ..., description="The core conflict or tension that will drive the comic narrative"
-    )
-    narrative_arc: str = Field(
-        ..., description="Brief description of how the story should flow from setup to resolution"
-    )
-    lecture_topic: str = Field(..., description="One-line summary of the lecture topic")
-
-
-# ── Step 3: Character Mapper (Subconscious answerFormat) ──
 
 
 class Character(BaseModel):
@@ -52,16 +37,6 @@ class Character(BaseModel):
     )
 
 
-class CharacterMap(BaseModel):
-    characters: list[Character] = Field(...)
-    art_style: str = Field(
-        ..., description="Consistent art style directive for all panels, e.g. 'vibrant manga with cel shading'"
-    )
-
-
-# ── Step 4: Panel Script Writer (Subconscious answerFormat) ──
-
-
 class PanelScript(BaseModel):
     panel_number: int = Field(..., ge=1, le=5)
     setting: str = Field(..., description="Where this panel takes place")
@@ -71,30 +46,51 @@ class PanelScript(BaseModel):
     mood: str = Field(..., description="Emotional tone: tense, humorous, triumphant, etc.")
 
 
-class ComicScript(BaseModel):
-    title: str = Field(..., description="Comic title")
-    panels: list[PanelScript] = Field(...)
-
-
-# ── Step 5: Image Prompt Generator (Subconscious answerFormat) ──
-
-
 class ImagePrompt(BaseModel):
     panel_number: int = Field(..., ge=1, le=5)
     prompt: str = Field(
-        ..., description="Detailed image prompt: scene, characters, composition, lighting, style"
+        ..., description="Detailed image prompt: scene, characters, composition, lighting, style. Must start with the art_style for consistency."
     )
     negative_prompt: str = Field(default="", description="What to avoid in the image")
 
 
-class ImagePrompts(BaseModel):
-    prompts: list[ImagePrompt] = Field(...)
-    style_consistency_note: str = Field(
-        ..., description="A reminder string for consistent style across all panels"
+class ComicBlueprint(BaseModel):
+    """Single structured output from Subconscious that covers the entire creative pipeline:
+    concept extraction, character design, script writing, and image prompt generation."""
+
+    # Concept extraction
+    lecture_topic: str = Field(..., description="One-line summary of the lecture topic")
+    concepts: list[Concept] = Field(
+        ..., description="3-8 key concepts extracted from the lecture"
+    )
+    central_tension: str = Field(
+        ..., description="The core conflict or tension that drives the comic narrative"
+    )
+    narrative_arc: str = Field(
+        ..., description="Brief description of how the story flows from setup to resolution"
+    )
+
+    # Character design
+    characters: list[Character] = Field(
+        ..., description="2-6 characters, each personifying a concept with detailed visual descriptions"
+    )
+    art_style: str = Field(
+        ..., description="Consistent art style for all panels, e.g. 'vibrant manga with cel shading'"
+    )
+
+    # Comic script
+    title: str = Field(..., description="Comic title")
+    panels: list[PanelScript] = Field(
+        ..., description="Exactly 5 comic panels with dialogue, action, and mood"
+    )
+
+    # Image prompts
+    image_prompts: list[ImagePrompt] = Field(
+        ..., description="Exactly 5 detailed image generation prompts, one per panel"
     )
 
 
-# ── Step 6: Image Generation result ──
+# ── Step 3: Image Generation result ──
 
 
 class GeneratedImage(BaseModel):
@@ -107,7 +103,7 @@ class GeneratedImage(BaseModel):
 
 
 class PipelineEvent(BaseModel):
-    step: int = Field(..., ge=1, le=6, description="Pipeline step number")
+    step: int = Field(..., ge=1, le=3, description="Pipeline step number")
     step_name: str
     status: str = Field(..., description="started | completed | progress | error")
     data: dict | None = Field(default=None, description="Step output data when completed")
