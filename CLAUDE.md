@@ -4,33 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project: Comify
 
-A hackathon project that converts lecture slideshows into comic book panels. Users upload a .pptx or .pdf, and a 6-step AI pipeline extracts concepts, builds characters, writes a script, generates image prompts, and produces comic panel images.
+A hackathon project that converts lecture slideshows into comic book panels. Users upload a .pptx or .pdf, and a 3-step AI pipeline extracts concepts, builds characters, writes a script, generates image prompts, and produces comic panel images.
 
 ## Architecture
 
 Monorepo with two independent projects:
 
-- **`backend/`** — Python FastAPI server. All request/response types use Pydantic models, including `answerFormat` for structured LLM outputs from Subconscious. Orchestrates the 6-step pipeline and calls fal.ai for image generation.
+- **`backend/`** — Python FastAPI server. All request/response types use Pydantic models, including `answerFormat` for structured LLM outputs from Subconscious. Orchestrates the 3-step pipeline and calls fal.ai for image generation.
 - **`frontend/`** — React + TypeScript SPA built with Vite. Drag-and-drop file upload, SSE streaming for real-time pipeline progress, progressive panel rendering.
 
-### Pipeline (6 steps, streamed via SSE)
+### Pipeline (3 steps, streamed via SSE)
 
 Each step yields `PipelineEvent` objects streamed as SSE to the frontend:
 
 1. **Parse Slideshow** — `python-pptx` for .pptx, `PyMuPDF` for .pdf. Extracts text per slide.
-2. **Concept Extractor** — Subconscious `client.run()` with `answerFormat=ConceptExtraction`. Finds key ideas, central tension, narrative arc.
-3. **Character Mapper** — Subconscious run, `answerFormat=CharacterMap`. Assigns personas to concepts with visual descriptions and an art style.
-4. **Panel Script Writer** — Subconscious run, `answerFormat=ComicScript`. Writes 5-panel comic script with dialogue, action, mood.
-5. **Image Prompt Generator** — Subconscious run, `answerFormat=ImagePrompts`. Creates fal.ai-optimized prompts per panel.
-6. **Image Generator** — `fal_client.run("fal-ai/flux/dev")` for each panel. Yields progress events so panels appear progressively on the frontend.
+2. **Create Comic Blueprint** — Single Subconscious `client.run()` with `answerFormat=ComicBlueprint`. The TIM engine handles the full creative chain in one call: concept extraction, character design, script writing, and image prompt generation. Output is a single `ComicBlueprint` Pydantic model containing all fields.
+3. **Draw Panels** — `fal_client.run("fal-ai/flux/dev")` for each of 5 panels. Yields `progress` events so panels appear progressively on the frontend.
+
+### Background Jobs + Persistence
+
+The pipeline runs in a background thread decoupled from the SSE connection:
+- `POST /api/convert` starts the job and returns `{ job_id }`
+- `GET /api/jobs/{id}/stream` replays completed events then follows live
+- `GET /api/jobs/{id}` returns quick status
+- Jobs stored in-memory (`backend/app/job_store.py`) with 30-min TTL
+- Frontend stores `job_id` in localStorage — browser refresh reconnects to the running job
+- Final comic result cached in localStorage
 
 ### SSE Event Format
 ```
-data: {"step":2,"step_name":"Extracting concepts","status":"started","data":null,"error":null}
-data: {"step":2,"step_name":"Extracting concepts","status":"completed","data":{...},"error":null}
-data: {"step":6,"step_name":"Drawing panels","status":"progress","data":{"panel_number":1,"image_url":"..."},"error":null}
+data: {"step":1,"step_name":"Parsing slideshow","status":"started","data":null,"error":null}
+data: {"step":2,"step_name":"Creating comic blueprint","status":"completed","data":{...},"error":null}
+data: {"step":3,"step_name":"Drawing panels","status":"progress","data":{"panel_number":1,"image_url":"..."},"error":null}
 ```
-Status values: `started`, `completed`, `progress` (step 6 only), `error`.
+Status values: `started`, `completed`, `progress` (step 3 only), `error`.
 
 ## Commands
 
@@ -63,11 +70,12 @@ Frontend: `VITE_API_URL` defaults to `http://localhost:8000`.
 
 ## Key Files
 
-- `backend/app/models.py` — All Pydantic models for each pipeline step
-- `backend/app/pipeline.py` — 6-step pipeline generator: file parsing, 4 Subconscious calls, fal.ai image gen
-- `backend/app/routes.py` — `POST /api/convert` accepts file upload, streams SSE
+- `backend/app/models.py` — All Pydantic models. `ComicBlueprint` is the single answerFormat for the Subconscious call.
+- `backend/app/pipeline.py` — 3-step pipeline generator: file parsing, 1 Subconscious call, fal.ai image gen
+- `backend/app/job_store.py` — In-memory job store with threading.Event for SSE notification
+- `backend/app/routes.py` — `POST /api/convert`, `GET /api/jobs/{id}/stream`, `GET /api/jobs/{id}`
 - `backend/app/config.py` — Settings via pydantic-settings
-- `frontend/src/App.tsx` — Drag-and-drop upload, SSE consumption, progressive rendering
+- `frontend/src/App.tsx` — Drag-and-drop upload, SSE consumption, reconnect on refresh, progressive rendering
 - `api/index.py` — Vercel serverless entrypoint
 
 ## Subconscious SDK
