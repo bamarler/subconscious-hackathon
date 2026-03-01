@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .routes import router
 
-app = FastAPI(title="Dream Decoder", version="0.1.0")
+app = FastAPI(title="Comify", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
