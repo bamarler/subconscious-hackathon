@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type DragEvent, type ChangeEvent } from 'react'
 import './App.css'
 
 interface ComicPanel {
@@ -16,9 +16,18 @@ interface ComicResult {
   panels: ComicPanel[]
 }
 
+interface PipelineEvent {
+  step: number
+  step_name: string
+  status: string
+  data: Record<string, unknown> | null
+  error: string | null
+}
+
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-const LOADING_MESSAGES = [
+const PIPELINE_STEPS = [
+  'Parsing slideshow...',
   'Extracting key concepts...',
   'Casting characters...',
   'Writing the script...',
@@ -27,34 +36,50 @@ const LOADING_MESSAGES = [
 ]
 
 function App() {
-  const [lectureNotes, setLectureNotes] = useState('')
+  const [file, setFile] = useState<File | null>(null)
+  const [dragActive, setDragActive] = useState(false)
   const [comic, setComic] = useState<ComicResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [loadingMsg, setLoadingMsg] = useState('')
   const [step, setStep] = useState(0)
+  const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set())
+  const [panels, setPanels] = useState<ComicPanel[]>([])
+
+  const handleDrag = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true)
+    else if (e.type === 'dragleave') setDragActive(false)
+  }
+
+  const handleDrop = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragActive(false)
+    if (e.dataTransfer.files?.[0]) setFile(e.dataTransfer.files[0])
+  }
+
+  const handleFileInput = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) setFile(e.target.files[0])
+  }
 
   const convert = async () => {
-    if (lectureNotes.length < 20) return
+    if (!file) return
 
     setLoading(true)
     setError('')
     setComic(null)
+    setPanels([])
     setStep(0)
+    setCompletedSteps(new Set())
 
-    let msgIdx = 0
-    setLoadingMsg(LOADING_MESSAGES[0])
-    const interval = setInterval(() => {
-      msgIdx = Math.min(msgIdx + 1, LOADING_MESSAGES.length - 1)
-      setLoadingMsg(LOADING_MESSAGES[msgIdx])
-      setStep(msgIdx)
-    }, 8000)
+    const formData = new FormData()
+    formData.append('file', file)
 
     try {
       const res = await fetch(`${API_URL}/api/convert`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lecture_notes: lectureNotes }),
+        body: formData,
       })
 
       if (!res.ok) {
@@ -62,12 +87,63 @@ function App() {
         throw new Error(err.detail || `HTTP ${res.status}`)
       }
 
-      const data = await res.json()
-      setComic(data)
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const event: PipelineEvent = JSON.parse(line.slice(6))
+
+          if (event.status === 'started') {
+            setStep(event.step)
+          }
+
+          if (event.status === 'completed') {
+            setCompletedSteps((prev) => new Set([...prev, event.step]))
+          }
+
+          if (event.status === 'error') {
+            throw new Error(
+              `Step ${event.step} (${event.step_name}) failed: ${event.error}`
+            )
+          }
+
+          // Progressive panel rendering
+          if (
+            event.step === 6 &&
+            event.status === 'progress' &&
+            event.data?.image_url
+          ) {
+            const partial: ComicPanel = {
+              panel_number: event.data.panel_number as number,
+              setting: '',
+              characters: [],
+              dialogue: '',
+              action: '',
+              image_url: event.data.image_url as string,
+              image_prompt: '',
+            }
+            setPanels((prev) => [...prev, partial])
+          }
+
+          // Final result
+          if (event.step === 6 && event.status === 'completed' && event.data) {
+            setComic(event.data as unknown as ComicResult)
+          }
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong')
     } finally {
-      clearInterval(interval)
       setLoading(false)
     }
   }
@@ -75,22 +151,54 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Lecture to Comic</h1>
-        <p>Paste your lecture notes. Get a comic book.</p>
+        <h1>Comify</h1>
+        <p>Upload your lecture slides. Get a comic book.</p>
       </header>
 
       <div className="input-section">
-        <textarea
-          className="notes-input"
-          placeholder="Paste your lecture notes, slide text, or any educational content here..."
-          value={lectureNotes}
-          onChange={(e) => setLectureNotes(e.target.value)}
-          disabled={loading}
-        />
+        <div
+          className={`drop-zone ${dragActive ? 'drag-active' : ''} ${file ? 'has-file' : ''}`}
+          onDragEnter={handleDrag}
+          onDragLeave={handleDrag}
+          onDragOver={handleDrag}
+          onDrop={handleDrop}
+          onClick={() => document.getElementById('file-input')?.click()}
+        >
+          <input
+            id="file-input"
+            type="file"
+            accept=".pdf,.pptx"
+            onChange={handleFileInput}
+            hidden
+          />
+          {file ? (
+            <div className="file-info">
+              <span className="file-name">{file.name}</span>
+              <span className="file-size">
+                ({(file.size / 1024 / 1024).toFixed(1)} MB)
+              </span>
+              <button
+                className="remove-file"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setFile(null)
+                }}
+              >
+                x
+              </button>
+            </div>
+          ) : (
+            <div className="drop-prompt">
+              <p>Drop your slideshow here or click to browse</p>
+              <p className="drop-hint">Supports .pptx and .pdf (max 10 MB)</p>
+            </div>
+          )}
+        </div>
+
         <button
           className="convert-btn"
           onClick={convert}
-          disabled={loading || lectureNotes.length < 20}
+          disabled={loading || !file}
         >
           {loading ? 'Converting...' : 'Generate Comic'}
         </button>
@@ -99,17 +207,39 @@ function App() {
       {loading && (
         <div className="loading">
           <div className="pipeline-steps">
-            {LOADING_MESSAGES.map((msg, i) => (
-              <div
-                key={i}
-                className={`pipeline-step ${i < step ? 'done' : i === step ? 'active' : ''}`}
-              >
-                <span className="step-dot" />
-                <span className="step-label">{msg}</span>
-              </div>
-            ))}
+            {PIPELINE_STEPS.map((msg, i) => {
+              const stepNum = i + 1
+              const isDone = completedSteps.has(stepNum)
+              const isActive = step === stepNum && !isDone
+              return (
+                <div
+                  key={i}
+                  className={`pipeline-step ${isDone ? 'done' : isActive ? 'active' : ''}`}
+                >
+                  <span className="step-dot" />
+                  <span className="step-label">{msg}</span>
+                </div>
+              )
+            })}
           </div>
-          <p className="loading-text">{loadingMsg}</p>
+        </div>
+      )}
+
+      {/* Progressive panel preview during image generation */}
+      {loading && panels.length > 0 && (
+        <div className="panels-preview">
+          {panels.map((p) => (
+            <div key={p.panel_number} className="panel panel-arriving">
+              <div className="panel-image">
+                {p.image_url && (
+                  <img
+                    src={p.image_url}
+                    alt={`Panel ${p.panel_number}`}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -123,7 +253,10 @@ function App() {
               <div key={panel.panel_number} className="panel">
                 <div className="panel-image">
                   {panel.image_url ? (
-                    <img src={panel.image_url} alt={`Panel ${panel.panel_number}`} />
+                    <img
+                      src={panel.image_url}
+                      alt={`Panel ${panel.panel_number}`}
+                    />
                   ) : (
                     <div className="panel-placeholder">
                       <span className="panel-number">#{panel.panel_number}</span>
@@ -141,7 +274,7 @@ function App() {
         </div>
       )}
 
-      <p className="powered-by">Powered by Subconscious AI + Ideogram</p>
+      <p className="powered-by">Powered by Subconscious AI + fal.ai</p>
     </div>
   )
 }

@@ -2,89 +2,82 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project: Lecture-to-Comic Converter
+## Project: Comify
 
-A hackathon project that converts lecture slideshow notes into comic book panels. Uses a 5-tool Subconscious AI agent pipeline to extract concepts, build characters, write dialogue, generate image prompts, and produce visuals via Ideogram.
+A hackathon project that converts lecture slideshows into comic book panels. Users upload a .pptx or .pdf, and a 6-step AI pipeline extracts concepts, builds characters, writes a script, generates image prompts, and produces comic panel images.
 
 ## Architecture
 
 Monorepo with two independent projects:
 
-- **`backend/`** — Python FastAPI server. All request/response types use Pydantic models, including `answerFormat` for structured LLM outputs from Subconscious. Manages the 5-step pipeline and calls Ideogram for image generation.
-- **`frontend/`** — React + TypeScript SPA built with Vite. Lightweight, minimal dependencies.
+- **`backend/`** — Python FastAPI server. All request/response types use Pydantic models, including `answerFormat` for structured LLM outputs from Subconscious. Orchestrates the 6-step pipeline and calls fal.ai for image generation.
+- **`frontend/`** — React + TypeScript SPA built with Vite. Drag-and-drop file upload, SSE streaming for real-time pipeline progress, progressive panel rendering.
 
-### Pipeline (5 Subconscious agent tools, chained sequentially)
+### Pipeline (6 steps, streamed via SSE)
 
-Each step is a separate Subconscious `client.run()` call with its own Pydantic `answerFormat`:
+Each step yields `PipelineEvent` objects streamed as SSE to the frontend:
 
-1. **Concept Extractor** — Takes raw lecture notes. Extracts key ideas, core tension/conflict, and the narrative arc that will drive the comic. Output: list of concepts with relationships and a central conflict.
+1. **Parse Slideshow** — `python-pptx` for .pptx, `PyMuPDF` for .pdf. Extracts text per slide.
+2. **Concept Extractor** — Subconscious `client.run()` with `answerFormat=ConceptExtraction`. Finds key ideas, central tension, narrative arc.
+3. **Character Mapper** — Subconscious run, `answerFormat=CharacterMap`. Assigns personas to concepts with visual descriptions and an art style.
+4. **Panel Script Writer** — Subconscious run, `answerFormat=ComicScript`. Writes 5-panel comic script with dialogue, action, mood.
+5. **Image Prompt Generator** — Subconscious run, `answerFormat=ImagePrompts`. Creates fal.ai-optimized prompts per panel.
+6. **Image Generator** — `fal_client.run("fal-ai/flux/dev")` for each panel. Yields progress events so panels appear progressively on the frontend.
 
-2. **Character Mapper** — Takes extracted concepts. Assigns a persona/character to each concept (e.g., "Recursion" becomes a snake eating its tail, "Big-O Notation" becomes a stopwatch-wielding referee). Output: character profiles with names, visual descriptions, and which concept they embody.
-
-3. **Panel Script Writer** — Takes characters + concepts. Writes a 5-panel comic script with dialogue, action descriptions, and panel layout notes. The narrative should use the tension from step 1 to create an actual mini-story. Output: 5 panels each with setting, characters present, dialogue, and action.
-
-4. **Image Prompt Generator** — Takes each panel script. Generates a detailed Ideogram-optimized image prompt per panel, including art style consistency cues, character visual references, and composition direction. Output: 5 image generation prompts with style/aspect ratio metadata.
-
-5. **Image Generator (Ideogram API)** — Takes the prompts from step 4. Calls Ideogram v3 API (`POST https://api.ideogram.ai/v1/ideogram-v3/generate`) to generate the actual comic panel images. Uses `style_type: FICTION`, consistent style codes across panels, and comic-appropriate aspect ratios.
-
-### Pydantic Models (all in `backend/app/models.py`)
-
-Every pipeline step has a dedicated Pydantic model for its structured output. These models are passed directly as `answerFormat` to Subconscious — the SDK auto-converts via `model_json_schema()`.
+### SSE Event Format
+```
+data: {"step":2,"step_name":"Extracting concepts","status":"started","data":null,"error":null}
+data: {"step":2,"step_name":"Extracting concepts","status":"completed","data":{...},"error":null}
+data: {"step":6,"step_name":"Drawing panels","status":"progress","data":{"panel_number":1,"image_url":"..."},"error":null}
+```
+Status values: `started`, `completed`, `progress` (step 6 only), `error`.
 
 ## Commands
 
 ### Backend (uv)
 ```bash
-# Install dependencies
 uv sync --project backend
-
-# Run dev server
 uv run --project backend --directory backend uvicorn app.main:app --reload --port 8000
 ```
 
 ### Frontend (bun)
 ```bash
-# Install dependencies
 bun install --cwd frontend
-
-# Dev server (port 5173)
 bun run --cwd frontend dev
-
-# Build
 bun run --cwd frontend build
+```
 
-# Type check
-bun run --cwd frontend tsc -b
+### Both (Makefile)
+```bash
+make init    # install all deps + create .env
+make up      # start backend + frontend dev servers
 ```
 
 ## Environment Variables
 
 `backend/.env` (copy from `.env.example`):
 - `SUBCONSCIOUS_API_KEY` — from subconscious.dev dashboard
-- `IDEOGRAM_API_KEY` — from ideogram.ai developer settings
-- `VITE_API_URL` — (frontend) defaults to `http://localhost:8000`
+- `FAL_KEY` — from fal.ai dashboard
 
-## Subconscious SDK Usage
-
-- `client.run(engine, input, options)` with `await_completion=True` for sync calls
-- `client.stream(engine, input)` yields `DeltaEvent`/`DoneEvent`/`ErrorEvent` for SSE
-- Pass Pydantic model classes directly to `answerFormat` — SDK auto-converts
-- Available engines: `tim-edge`, `tim-gpt`, `tim-gpt-heavy` (use `tim-gpt` as default)
-- Platform tools: `{"type": "platform", "id": "web_search"}`
-
-## Ideogram API Usage
-
-- **Endpoint**: `POST https://api.ideogram.ai/v1/ideogram-v3/generate`
-- **Auth**: `Api-Key` header
-- **Content-Type**: `multipart/form-data`
-- **Key params**: `prompt`, `aspect_ratio`, `style_type` (FICTION for comics), `style_preset`, `rendering_speed`, `num_images`, `negative_prompt`
-- **Response**: `{ data: [{ url, prompt, resolution, seed, is_image_safe }] }`
-- Image URLs expire — download and serve/cache them
+Frontend: `VITE_API_URL` defaults to `http://localhost:8000`.
 
 ## Key Files
 
-- `backend/app/models.py` — All Pydantic models for each pipeline step's input/output
-- `backend/app/routes.py` — FastAPI routes: main `/api/convert` endpoint that orchestrates the pipeline
-- `backend/app/pipeline.py` — The 5-step pipeline logic: concept extraction → character mapping → script writing → prompt generation → image generation
-- `backend/app/config.py` — Settings via pydantic-settings, reads from `.env`
-- `frontend/src/App.tsx` — Upload/paste interface and comic panel display
+- `backend/app/models.py` — All Pydantic models for each pipeline step
+- `backend/app/pipeline.py` — 6-step pipeline generator: file parsing, 4 Subconscious calls, fal.ai image gen
+- `backend/app/routes.py` — `POST /api/convert` accepts file upload, streams SSE
+- `backend/app/config.py` — Settings via pydantic-settings
+- `frontend/src/App.tsx` — Drag-and-drop upload, SSE consumption, progressive rendering
+- `api/index.py` — Vercel serverless entrypoint
+
+## Subconscious SDK
+
+- `client.run(engine, input, options)` with `await_completion=True`
+- Pass Pydantic classes directly to `answerFormat` — auto-converts via `model_json_schema()`
+- Engines: `tim-edge`, `tim-gpt`, `tim-gpt-heavy` (default: `tim-gpt`)
+
+## fal.ai SDK
+
+- `fal_client.run("fal-ai/flux/dev", arguments={...})` — returns `{"images": [{"url": "..."}]}`
+- Auth: reads `FAL_KEY` env var automatically
+- Key params: `prompt`, `image_size` (landscape_16_9), `num_images`, `num_inference_steps`, `guidance_scale`

@@ -1,58 +1,132 @@
 from pydantic import BaseModel, Field
 
 
-class DreamInput(BaseModel):
-    """User's dream description submitted for analysis."""
-
-    dream_text: str = Field(..., min_length=10, description="Description of the dream")
-    mood: str | None = Field(None, description="How the dreamer felt (optional)")
+# ── Step 1: File Parsing ──
 
 
-class DreamSymbol(BaseModel):
-    """A symbol extracted from the dream."""
-
-    symbol: str = Field(..., description="The symbol or motif found in the dream")
-    meaning: str = Field(..., description="Creative psychological interpretation")
-    vibe: str = Field(..., description="One-word vibe check for this symbol")
+class SlideContent(BaseModel):
+    slide_number: int
+    text: str = Field(..., description="All text extracted from this slide")
 
 
-class DreamConnection(BaseModel):
-    """A surprising real-world connection found via web search."""
-
-    title: str = Field(..., description="Title of the connection")
-    explanation: str = Field(..., description="How this connects to the dream")
-    source: str | None = Field(None, description="Source URL if found via search")
+class ParsedLecture(BaseModel):
+    title: str = Field("", description="Lecture title if detected")
+    slides: list[SlideContent]
+    full_text: str = Field(..., description="Concatenated text from all slides")
 
 
-class DreamAnalysis(BaseModel):
-    """Structured output from the AI dream analysis."""
+# ── Step 2: Concept Extractor (Subconscious answerFormat) ──
 
-    summary: str = Field(..., description="A poetic one-sentence summary of the dream")
-    archetype: str = Field(..., description="The Jungian archetype this dream evokes")
-    symbols: list[DreamSymbol] = Field(..., description="Key symbols and their meanings")
-    connections: list[DreamConnection] = Field(
-        default_factory=list, description="Surprising real-world connections"
+
+class Concept(BaseModel):
+    name: str = Field(..., description="Short name for the concept")
+    description: str = Field(..., description="One-sentence explanation")
+    importance: int = Field(..., ge=1, le=10, description="How central to the lecture (1-10)")
+
+
+class ConceptExtraction(BaseModel):
+    concepts: list[Concept] = Field(
+        ..., description="Key concepts extracted from the lecture"
     )
-    hidden_message: str = Field(
-        ..., description="The 'hidden message' your subconscious is sending you"
+    central_tension: str = Field(
+        ..., description="The core conflict or tension that will drive the comic narrative"
     )
-    dream_score: int = Field(
-        ..., ge=1, le=100, description="How wild this dream is on a scale of 1-100"
+    narrative_arc: str = Field(
+        ..., description="Brief description of how the story should flow from setup to resolution"
     )
-    recommended_song: str = Field(
-        ..., description="A real song that matches this dream's energy"
+    lecture_topic: str = Field(..., description="One-line summary of the lecture topic")
+
+
+# ── Step 3: Character Mapper (Subconscious answerFormat) ──
+
+
+class Character(BaseModel):
+    name: str = Field(..., description="Character name (creative, memorable)")
+    concept: str = Field(..., description="Which concept this character personifies")
+    visual_description: str = Field(
+        ..., description="Detailed visual appearance for image generation: clothing, colors, features"
+    )
+    personality: str = Field(..., description="One-sentence personality trait")
+    role: str = Field(
+        ..., description="Role in the story: protagonist, antagonist, mentor, etc."
     )
 
 
-class DreamResponse(BaseModel):
-    """API response wrapper for dream analysis."""
+class CharacterMap(BaseModel):
+    characters: list[Character] = Field(...)
+    art_style: str = Field(
+        ..., description="Consistent art style directive for all panels, e.g. 'vibrant manga with cel shading'"
+    )
 
-    analysis: DreamAnalysis
-    engine_used: str = Field(..., description="Which Subconscious engine was used")
+
+# ── Step 4: Panel Script Writer (Subconscious answerFormat) ──
 
 
-class ErrorResponse(BaseModel):
-    """Error response."""
+class PanelScript(BaseModel):
+    panel_number: int = Field(..., ge=1, le=5)
+    setting: str = Field(..., description="Where this panel takes place")
+    characters_present: list[str] = Field(..., description="Character names in this panel")
+    dialogue: str = Field(..., description="Speech bubble text")
+    action: str = Field(..., description="What is happening visually in the panel")
+    mood: str = Field(..., description="Emotional tone: tense, humorous, triumphant, etc.")
 
-    error: str
-    detail: str | None = None
+
+class ComicScript(BaseModel):
+    title: str = Field(..., description="Comic title")
+    panels: list[PanelScript] = Field(...)
+
+
+# ── Step 5: Image Prompt Generator (Subconscious answerFormat) ──
+
+
+class ImagePrompt(BaseModel):
+    panel_number: int = Field(..., ge=1, le=5)
+    prompt: str = Field(
+        ..., description="Detailed image prompt: scene, characters, composition, lighting, style"
+    )
+    negative_prompt: str = Field(default="", description="What to avoid in the image")
+
+
+class ImagePrompts(BaseModel):
+    prompts: list[ImagePrompt] = Field(...)
+    style_consistency_note: str = Field(
+        ..., description="A reminder string for consistent style across all panels"
+    )
+
+
+# ── Step 6: Image Generation result ──
+
+
+class GeneratedImage(BaseModel):
+    panel_number: int
+    url: str
+    seed: int | None = None
+
+
+# ── SSE Event Envelope ──
+
+
+class PipelineEvent(BaseModel):
+    step: int = Field(..., ge=1, le=6, description="Pipeline step number")
+    step_name: str
+    status: str = Field(..., description="started | completed | progress | error")
+    data: dict | None = Field(default=None, description="Step output data when completed")
+    error: str | None = None
+
+
+# ── Final Comic Output ──
+
+
+class ComicPanel(BaseModel):
+    panel_number: int
+    setting: str
+    characters: list[str]
+    dialogue: str
+    action: str
+    image_url: str | None = None
+    image_prompt: str
+
+
+class ComicResult(BaseModel):
+    title: str
+    panels: list[ComicPanel]

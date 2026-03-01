@@ -3,3 +3,7 @@ pydantic>=2.12.5
 pydantic-settings>=2.13.1
 python-dotenv>=1.2.2
 subconscious-sdk>=0.2.1
+python-pptx>=1.0.2
+PyMuPDF>=1.27.1
+python-multipart>=0.0.22
+fal-client>=0.13.1
